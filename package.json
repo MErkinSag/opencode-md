@@ -1,0 +1,21 @@
+{
+  "name": "md",
+  "description": "Markdown styling for OpenCode: typography, tables, lists, quotes, JSON, and enlarged headings.",
+  "version": "0.1.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MErkinSag/opencode-md.git"
+  },
+  "type": "module",
+  "exports": { "./tui": "./tui.ts" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.1.1"
+  },
+  "devDependencies": {
+    "@opentui/core": "0.9.1"
+  }
+}

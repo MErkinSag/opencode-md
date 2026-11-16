@@ -1,0 +1,5 @@
+{
+  "name": "md-stream-test",
+  "type": "module",
+  "exports": { "./tui": "./tui.ts" }
+}

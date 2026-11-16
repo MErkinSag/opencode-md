@@ -1,0 +1,11 @@
+NATIVE_BODY_SENTINEL
+
+INLINE_STYLE_SENTINEL **BOLD_WORD** *ITALIC_WORD* `CODE_WORD` [LINK_WORD](https://example.com).
+
+- INLINE_LIST **LIST_BOLD** *LIST_ITALIC* `LIST_CODE`.
+
+> INLINE_QUOTE **QUOTE_BOLD** *QUOTE_ITALIC* `QUOTE_CODE`.
+
+```json
+{"inline_fixture":"native syntax"}
+```
