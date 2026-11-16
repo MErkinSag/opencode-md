@@ -1,20 +1,69 @@
-import { TextTableRenderable, type MarkdownRenderable, type OptimizedBuffer } from "@opentui/core"
+import { TextTableRenderable, type MarkdownRenderable, type OptimizedBuffer, type TextBufferView } from "@opentui/core"
 import type { Appearance } from "./appearance"
 
 type Content = TextTableRenderable["content"]
 type Cell = NonNullable<Content[number][number]>
 type State = { source: Content; cells: WeakMap<Cell, Map<number, Cell>>; update: () => void; restore: () => void }
 type Layout = { rowOffsets: number[]; rowHeights: number[]; columnOffsets: number[]; columnWidths: number[] }
+type NativeCell = { textBufferView: TextBufferView }
 
-// OpenTUI only exposes uniform vertical padding. Keep the grid's measured
-// header two rows taller, and inset its native text viewport by one row.
+// OpenTUI only exposes uniform padding. Give the header three columns on each
+// side and one row above/below, while body cells keep two columns on each side.
 // Selection uses that same text geometry; hit testing still sees the full cell.
-function padHeader(table: TextTableRenderable) {
-  const keys = ["computeRowHeights", "applyLayoutToViews", "applySelectionToCells",
-    "getCellAtLocalPosition", "findRowForLocalY"]
+function padHeader(table: TextTableRenderable, range: boolean) {
+  const keys = ["computeColumnWidths", "computeRowHeights", "applyLayoutToViews", "applySelectionToCells",
+    "getFullCellSelectionCoords", "getCellAtLocalPosition", "findRowForLocalY"]
   const undo: (() => void)[] = []
   const cache = new WeakMap<Layout, Layout>()
   let grid: Layout | undefined
+  let offsetSelection = false
+  const cells = () => Reflect.get(table, "_cells") as NativeCell[][]
+
+  function withFields<T>(fields: Record<string, unknown>, run: () => T): T {
+    const previous = Object.keys(fields).map(key => [key, Reflect.get(table, key)] as const)
+    for (const [key, value] of Object.entries(fields)) Reflect.set(table, key, value)
+    try { return run() }
+    finally { for (const [key, value] of previous) Reflect.set(table, key, value) }
+  }
+
+  function withHeader<T>(run: () => T) {
+    return withFields({ _rowCount: Math.min(1, cells().length),
+      _cellPaddingX: table.cellPaddingX + 1, _cellPaddingY: 1 }, run)
+  }
+
+  function localSelection<T>(run: () => T): T {
+    const previous = offsetSelection
+    offsetSelection = false
+    try { return run() }
+    finally { offsetSelection = previous }
+  }
+
+  function selectHeader<T>(run: () => T): T {
+    const restore: (() => void)[] = []
+    const previous = offsetSelection
+    try {
+      // Native selection still owns column locking, direction, and copy text.
+      // Translate only screen-derived header coordinates into its inset view.
+      for (const cell of cells()[0] ?? []) {
+        for (const key of ["setLocalSelection", "updateLocalSelection"] as const) {
+          const view = cell.textBufferView
+          const original = view[key]
+          const own = Object.getOwnPropertyDescriptor(view, key)
+          view[key] = (ax, ay, fx, fy, ...colors) =>
+            original.call(view, ax - Number(offsetSelection), ay, fx - Number(offsetSelection), fy, ...colors)
+          restore.push(() => {
+            if (own) Object.defineProperty(view, key, own)
+            else Reflect.deleteProperty(view, key)
+          })
+        }
+      }
+      offsetSelection = true
+      return withText(run)
+    } finally {
+      offsetSelection = previous
+      restore.forEach(undo => undo())
+    }
+  }
 
   function textLayout(layout: Layout) {
     if (!layout.rowHeights.length) return layout
@@ -44,23 +93,42 @@ function padHeader(table: TextTableRenderable) {
 
   // Leave an unfamiliar runtime's native geometry intact.
   if (!keys.every(key => typeof Reflect.get(table, key) === "function"))
-    return { draw: <T>(run: () => T) => run(), restore() {} }
+    return { draw: (run: (a: number, b: number) => unknown, a: number, b: number) => run(a, b), restore() {} }
 
-  for (const key of keys) {
+  for (const key of [...keys, "movedAnchor", "pressOffset"]) {
     const original = Reflect.get(table, key)
+    if (typeof original !== "function") continue
     const own = Object.getOwnPropertyDescriptor(table, key)
     const wrapper = (...args: unknown[]) => {
       const run = () => Reflect.apply(original, table, args)
+      if (key === "computeColumnWidths") {
+        // Reserve enough width for the larger inset, including narrow columns.
+        return withFields({ _cellPaddingX: table.cellPaddingX + 1 }, run)
+      }
       if (key === "computeRowHeights") {
         const heights = run() as number[]
-        if (heights.length) heights[0] += 2
+        if (heights.length) heights[0] = (withHeader(run) as number[])[0]
         return heights
       }
       if (key === "applyLayoutToViews") {
-        args[0] = textLayout(args[0] as Layout)
-        return run()
+        run()
+        return withHeader(run)
       }
-      if (key === "applySelectionToCells") return withText(run)
+      if (key === "applySelectionToCells") return selectHeader(run)
+      if (key === "getFullCellSelectionCoords") {
+        if (args[0] !== 0) return run()
+        const coords = withFields({ _cellPaddingX: table.cellPaddingX + 1 }, run)
+        // Full-cell coordinates are already local; cancel the translation.
+        return offsetSelection ? { ...coords, anchorX: coords.anchorX + 1, focusX: coords.focusX + 1 } : coords
+      }
+      // Newer OpenTUI probes local view coordinates to retain a dragged anchor
+      // across reflow. These probes must not be translated as screen positions.
+      if (key === "pressOffset") return localSelection(run)
+      if (key === "movedAnchor") return localSelection(() => {
+        if (Reflect.get(table, "_pressedCell")?.rowIdx === 0)
+          return withFields({ _cellPaddingX: table.cellPaddingX + 1 }, run)
+        return run()
+      })
       return grid ? withLayout(grid, run) : run()
     }
     Reflect.set(table, key, wrapper)
@@ -70,7 +138,25 @@ function padHeader(table: TextTableRenderable) {
       else Reflect.deleteProperty(table, key)
     })
   }
-  return { draw: withText, restore: () => undo.forEach(restore => restore()) }
+  return {
+    draw(run: (a: number, b: number) => unknown, a: number, b: number) {
+      if (range) {
+        if (a === 0 && b >= 0) withHeader(() => run(0, 0))
+        if (b >= Math.max(1, a)) return run(Math.max(1, a), b)
+        return
+      }
+      withHeader(() => run(a, b))
+      // The newer drawing API has no row range. Skip the header for the body
+      // pass, reusing the native buffers and restoring the row synchronously.
+      const rows = cells()
+      if (!rows.length) return
+      const header = rows[0]
+      rows[0] = []
+      try { return run(a, b) }
+      finally { rows[0] = header }
+    },
+    restore: () => undo.forEach(restore => restore()),
+  }
 }
 
 // Keep OpenTUI's table text buffers, layout, wrapping and selection. Decorate
@@ -82,7 +168,7 @@ export function createTables() {
 
   function layout(table: TextTableRenderable) {
     table.columnWidthMode = "full"
-    table.cellPaddingX = 1
+    table.cellPaddingX = 2
     table.cellPaddingY = 0
     table.columnGap = 0
     table.border = true
@@ -100,7 +186,7 @@ export function createTables() {
     if (!content?.get || !content.set || typeof paint !== "function") return
     const ownContent = Object.getOwnPropertyDescriptor(table, "content")
     const ownPaint = Object.getOwnPropertyDescriptor(table, paintKey)
-    const header = padHeader(table)
+    const header = padHeader(table, paintKey === "drawCellRange")
     const background = (row: number) => row === 0 ? palette.header : palette.row
     const state: State = {
       source: table.content, cells: new WeakMap(),
@@ -161,7 +247,7 @@ export function createTables() {
           buffer.fillRect(left, top, measured.columnWidths[column], height, background(row))
         }
       }
-      return header.draw(() => Reflect.apply(paint, table, [buffer, a, b]))
+      return header.draw((first, last) => Reflect.apply(paint, table, [buffer, first, last]), a, b)
     })
     states.set(table, state)
     stats.attached++
@@ -195,7 +281,7 @@ export function createTables() {
             // Markdown reapplies these native options to reused tables while
             // streaming, after it has updated their content.
             return node.conceal ? { ...result, columnWidthMode: "full",
-              cellPaddingX: 1, cellPaddingY: 0, columnGap: 0,
+              cellPaddingX: 2, cellPaddingY: 0, columnGap: 0,
               border: true, outerBorder: true, showBorders: true, borderColor: palette.border } : result
           }
           const table = key === "createTextTableRenderable" ? result : args[0]

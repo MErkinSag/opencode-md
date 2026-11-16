@@ -407,10 +407,9 @@ try:
         table = data["tables"][0]
         assert len(table["rows"]) == row_count, table
         assert table["borders"], "Table styling removed the outer/inner grid"
+        assert table["padding"] == 2, "Body cells need two spaces on each side"
         assert table["paddingY"] == 0, "Compact table cells should not add blank padding rows"
         assert table["rowHeights"][0] >= 3, "Header needs one filled row above and below its labels"
-        if table["rows"][0][1] == "Notes":
-            assert table["rowHeights"][0] == 3, table
         assert all(height == 1 for row, height in enumerate(table["rowHeights"]) if row not in (0, 3)), table
         assert table["y"] >= 0 and len(table["painted"]) == table["height"], "Fixture must be fully visible"
         heading = next(span for line in data["nativeHeadings"] for span in line if "TABLE_HEADING" in span["text"])
@@ -422,6 +421,9 @@ try:
                 cells = painted_cells(line)
                 for column, width in enumerate(table["columnWidths"]):
                     left = table["x"] + table["columnOffsets"][column] + 1
+                    padding = 3 if index == 0 else 2
+                    assert all(cell["char"] == " " for cell in cells[left:left + padding]), (index, column, line)
+                    assert all(cell["char"] == " " for cell in cells[left + width - padding:left + width]), (index, column, line)
                     for cell in cells[left:left + width]:
                         assert cell["bg"] == color or (cell["fg"] == INLINE_CODE and cell["bg"] == TABLE_CODE_BG), (index, column, cell)
                 for offset in table["columnOffsets"]:
@@ -435,7 +437,7 @@ try:
                         left = table["x"] + table["columnOffsets"][column] + 1
                         assert all(cell["char"] == " " for cell in cells[left:left + width]), (offset, cells)
                 for column, label in enumerate(table["rows"][0]):
-                    assert " ".join(" ".join(header_lines(table, column)).split()) == label, table
+                    assert "".join("".join(header_lines(table, column)).split()) == "".join(label.split()), table
                 for line in table["painted"][top + 1:top + table["rowHeights"][0] - 1]:
                     cells = painted_cells(line)
                     for column, width in enumerate(table["columnWidths"]):
@@ -448,13 +450,18 @@ try:
         for word in ["WHITE_CODE", "TABLE_CODE"]:
             code = next(span for line in table["painted"] for span in line if word in span["text"])
             assert code["fg"] == INLINE_CODE and code["bg"] == TABLE_CODE_BG, code
+        left = table["x"] + table["columnOffsets"][0] + 1
+        header = painted_cells(table["painted"][table["rowOffsets"][0] + 2])
+        body = painted_cells(table["painted"][table["rowOffsets"][1] + 1])
+        assert header[left + 3]["char"] == "N" and body[left + 2]["char"] == "R", (header, body)
         return table
     table = check_table(5)
     assert table["rowHeights"][3] > 1, table
     assert any("TABLE_CODE" in span["text"] and span["fg"] == INLINE_CODE for line in table["painted"] for span in line), table
     tx = table["x"] + table["columnOffsets"][0] + 1 + table["padding"] + 1
+    hx = tx + 1
     hy = table["y"] + table["rowOffsets"][0] + 3
-    selected = drag((tx, hy), (tx + len("Name"), hy))
+    selected = drag((hx, hy), (hx + len("Name"), hy))
     assert selected == "Name", selected
     os.write(master, b"\x1b")
     settle()
@@ -463,11 +470,11 @@ try:
     assert selected.strip() == "ROW_ONE", selected
     os.write(master, b"\x1b")
     settle()
-    selected = drag((tx, hy), (tx + len("ROW_ONE"), ty))
+    selected = drag((hx, hy), (tx + len("ROW_ONE"), ty))
     assert selected.splitlines() == ["Name", "ROW_ONE"], selected
     os.write(master, b"\x1b")
     settle()
-    selected = drag((tx + 3, hy), (tx + 1, hy))
+    selected = drag((hx + 3, hy), (hx + 1, hy))
     assert selected == "ame", selected
     os.write(master, b"\x1b")
     settle()
@@ -496,7 +503,7 @@ try:
     wait(lambda: not diag()["enabled"] and header_height() == 1,
          "Disable md restores compact native headers")
     os.write(master, b"/md on\r")
-    wait(lambda: diag()["enabled"] and header_height() == 3,
+    wait(lambda: diag()["enabled"] and header_height() >= 3,
          "Enable md restores padded headers")
     settle()
     check_table(7)
@@ -507,7 +514,7 @@ try:
     assert table["rowHeights"][0] > 3, table
     wrapped = header_lines(table, 1)
     assert wrapped[-1].endswith("HEADER_END"), wrapped
-    tx = table["x"] + table["columnOffsets"][1] + table["padding"] + 2
+    tx = table["x"] + table["columnOffsets"][1] + table["padding"] + 3
     hy = table["y"] + table["rowOffsets"][0] + 3
     selected = drag((tx, hy), (tx + len(wrapped[-1]), hy + len(wrapped) - 1))
     assert selected == table["rows"][0][1], selected

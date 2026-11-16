@@ -72,6 +72,7 @@ and native resources released when the adapter is detached.
 ### Tables
 
 Tables have a gray header with bold black labels and uniform white body rows.
+Body cells have two spaces on each side; header cells have three.
 Backgrounds fill each cell's entire interior,
 including vertical/horizontal padding, empty cells, and wrapped lines. The outer
 border and inner grid keep their own neutral color. Inline code retains its
