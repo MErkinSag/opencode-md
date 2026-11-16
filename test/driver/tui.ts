@@ -37,6 +37,25 @@ export default Plugin.define({
             })
             return
           }
+          if (input?.trim() === "fences") {
+            node.content = readFileSync(new URL("../fences.md", import.meta.url), "utf8")
+            return
+          }
+          if (input?.trim() === "fence-append") {
+            node.streaming = true
+            node.content += "\n\n```text\nFENCE_STREAM\n"
+            return
+          }
+          if (input?.trim() === "fence-close") {
+            node.content += "  **stream stays literal**\n```\n"
+            node.streaming = false
+            return
+          }
+          if (input?.trim().split(/\s+/)[0] === "fence-only") {
+            const language = input.trim().split(/\s+/)[1] ?? ""
+            node.content = "```" + language + "\nNATIVE_BODY_SENTINEL FENCE_ONLY\n  **still literal**\n```"
+            return
+          }
           if (input?.trim() === "tables") {
             node.tableOptions = { ...node.tableOptions, style: "grid" }
             node.content = readFileSync(new URL("../tables.md", import.meta.url), "utf8")
@@ -140,9 +159,27 @@ export default Plugin.define({
       const listSpacing: { before?: number; after?: number; first: string }[] = []
       const inline: unknown[] = []
       const tables: unknown[] = []
+      const fences: unknown[] = []
       const nativeHeadings: unknown[] = []
       const lists: { marker: string; x: number; textX: number; listX: number; y: number; width: number; body: { content: string; x: number; y: number; height: number }[] }[] = []
       function visit(node) {
+        if (node instanceof CodeRenderable && node.content.includes("FENCE_")) {
+          const box = node.parent
+          const labels = child => child instanceof TextRenderable
+            ? [child.chunks.map(chunk => chunk.text).join("")]
+            : child.getChildren().flatMap(labels)
+          fences.push({
+            content: node.content, plainText: node.plainText, filetype: node.filetype,
+            x: node.x, y: node.y, width: node.width, height: node.height, background: rgbToHex(node.bg),
+            box: box && { id: box.id, type: box.constructor.name, x: box.x, y: box.y,
+              width: box.width, height: box.height, marginTop: box.marginTop,
+              background: box instanceof BoxRenderable ? rgbToHex(box.backgroundColor) : undefined,
+              labels: labels(box),
+            },
+            above: box.y > 0 ? painted[box.y - 1] : [],
+            painted: painted.slice(Math.max(0, box.y), Math.max(0, box.y + box.height)),
+          })
+        }
         if (node instanceof CodeRenderable && node.content.includes("TABLE_HEADING")) {
           nativeHeadings.push(painted.slice(Math.max(0, node.y), Math.max(0, node.y + node.height)).flat())
         }
@@ -212,6 +249,10 @@ export default Plugin.define({
       snapshot(context.options.ready + ".list-spacing.json", JSON.stringify(listSpacing))
       snapshot(context.options.ready + ".tables.json", JSON.stringify({
         tables, nativeHeadings, background: rgbToHex(context.theme.background.base),
+      }))
+      snapshot(context.options.ready + ".fences.json", JSON.stringify({
+        fences, background: rgbToHex(context.theme.background.raised.base),
+        titleBackground: rgbToHex(context.theme.background.raised.high),
       }))
       snapshot(context.options.ready + ".inline.json", JSON.stringify({
         palette: { text: rgbToHex(context.theme.markdown.text), codeBackground: rgbToHex(context.theme.background.raised.high),

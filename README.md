@@ -1,7 +1,7 @@
 # md — Markdown styling for OpenCode
 
 One OpenCode 2 TUI plugin for Markdown typography, tables, lists, blockquotes,
-formatted JSON, and enlarged headings, controlled by one on/off switch.
+code blocks, formatted JSON, and enlarged headings, controlled by one on/off switch.
 Enlarged headings use small cached PNGs, drawn with Skia through `@napi-rs/canvas`.
 All styling runs inside OpenCode's existing transcript.
 
@@ -87,19 +87,27 @@ These are native terminal tables, not images. Changed cells are styled once;
 scrolling and resize reuse the styled content. A native cell-fill pass supplies
 the backgrounds through OpenTUI's existing table drawing and selection path.
 
-### JSON blocks
+### Fenced code blocks
 
-Markdown code fences labelled `json` now use a native, syntax-highlighted code
-panel with a subtle background, padding, and a JSON label. Valid JSON is
-automatically indented with two spaces. This feature is active whenever `md`
-styling is on.
+All Markdown code fences use a native panel with a subtle background, padded
+content, and a lowercase language label on a contrasting full-width title row
+(slightly darker in light mode). This includes `text`, `txt`, `plaintext`, bare
+triple-backtick fences, and programming languages. Unlabelled blocks use `text`.
+Each box has one blank row above it, outside the shaded panel. The title row sits
+at the panel's top edge. Content has two spaces of padding on each horizontal side.
+Native syntax highlighting, selection, and streaming are preserved. Markdown
+inside a fence stays literal, including asterisks, backticks, and indentation.
+Custom code-block widgets supplied by other plugins retain their own presentation.
+
+Valid `json` is additionally indented with two spaces. These features are active
+whenever `md` styling is on; `/md off` and source mode restore native presentation.
 
 Formatting changes only whitespace: large numbers, duplicate keys, key order,
 and string escapes are preserved exactly. Incomplete/invalid JSON remains
 literal while streaming. Blocks over 1 MB or with extreme nesting use their
-original text for responsiveness. Unlabelled fences, `jsonc`, inline JSON,
-and raw tool output retain their existing rendering. All JSON text remains
-selectable; message-copy actions still use the original message source.
+original text for responsiveness. Other fence contents, including `jsonc`, are
+preserved exactly. Inline JSON and raw tool output retain their existing handling.
+All code remains selectable; message-copy actions use the original message source.
 
 Body text, code blocks, links, tool interactions, menus, and the composer use
 OpenCode's own widgets. Headings support ordinary mouse drag selection, visible
@@ -189,6 +197,9 @@ streaming against the mounted Markdown widget without a model call. It verifies:
 - New/changing streamed headings render without errors.
 - Valid JSON is formatted in live native code widgets; incomplete JSON remains
   literal, including across streaming updates. Large integer tokens survive.
+- Text, unlabelled, programming-language, JSONC, and unknown-language fences get
+  filled native panels. Tests cover syntax colors, literal content, selection,
+  incomplete streaming, code-only Markdown, source mode, and `/md off` restoration.
 - Quotes retain native drag selection and accept streamed content.
 - Bullet/numbered lists retain nesting, starting numbers, hanging alignment,
   native selection, and wrapping after resize.

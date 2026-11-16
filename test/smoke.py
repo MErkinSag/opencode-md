@@ -522,13 +522,93 @@ try:
     settle()
     check_table(7)
     assert diag()["raster"]["renders"] == rasters, "Tables created image rasters"
+    os.write(master, b"/md-test fences\r")
+    def fence_data():
+        return json.loads(Path(str(READY) + ".fences.json").read_text())
+    wait(lambda: len(fence_data()["fences"]) == 6, "Fenced code fixtures")
+    settle()
+    def check_fences(count):
+        data = fence_data()
+        assert len(data["fences"]) == count, data
+        for fence in data["fences"]:
+            box = fence["box"]
+            assert box["marginTop"] == 1, fence
+            above = painted_cells(fence["above"])[box["x"]:box["x"] + box["width"]]
+            assert len(above) == box["width"] and all(cell["char"] == " " for cell in above), fence
+            assert box["background"] == fence["background"] == data["background"], fence
+            assert fence["x"] - box["x"] == 2, fence
+            assert fence["y"] - box["y"] == 2, fence
+            assert box["height"] == fence["height"] + 3, fence
+            assert fence["width"] == box["width"] - 4, fence
+            assert box["labels"] == [(fence.get("filetype") or "text").lower()], box["labels"]
+            assert fence["plainText"] == fence["content"], fence
+            assert box["y"] >= 0 and len(fence["painted"]) == box["height"], "Fences must be fully visible"
+            assert data["titleBackground"] != data["background"], data
+            for index, line in enumerate(fence["painted"]):
+                background = data["titleBackground"] if index == 0 else data["background"]
+                cells = painted_cells(line)[box["x"]:box["x"] + box["width"]]
+                assert len(cells) == box["width"] and all(cell["bg"] == background for cell in cells), (fence.get("filetype"), line)
+                if index > 0:
+                    assert all(cell["char"] == " " for cell in cells[:2] + cells[-2:]), line
+        return data["fences"]
+    fences = check_fences(6)
+    plain = next(fence for fence in fences if "FENCE_TEXT" in fence["content"])
+    assert plain["content"] == "FENCE_TEXT\n  **keep literal** and `backticks`", plain
+    bare = next(fence for fence in fences if "FENCE_BARE" in fence["content"])
+    assert bare["content"] == "FENCE_BARE\n  exact spaces", bare
+    jsonc = next(fence for fence in fences if "FENCE_JSONC" in fence["content"])
+    assert jsonc["content"] == '{ // FENCE_JSONC\n  "ready": true\n}', jsonc
+    javascript = next(fence for fence in fences if "FENCE_JS" in fence["content"])
+    code_colors = {span["fg"] for span in javascript["painted"][2]
+                   if span["text"].strip() and span["bg"] == fence_data()["background"]}
+    assert len(code_colors) > 1, "Code fences lost native syntax highlighting"
+    selected = drag((plain["x"] + 1, plain["y"] + 1), (plain["x"] + len("FENCE_TEXT"), plain["y"] + 1))
+    assert selected == "FENCE_TEXT", selected
+    os.write(master, b"\x1b")
+    settle()
+    panels = [fence["box"]["id"] for fence in check_fences(6)]
+    for i in range(10):
+        os.write(master, b"\x1b[<64;50;20M")
+        settle(.03)
+    settle()
+    assert [fence["box"]["id"] for fence in check_fences(6)] == panels, "Scrolling rebuilt code panels"
+    os.write(master, b"/md-test fence-append\r")
+    wait(lambda: len(fence_data()["fences"]) == 7, "Open streamed text fence")
+    settle()
+    assert check_fences(7)[-1]["content"].rstrip("\n") == "FENCE_STREAM"
+    os.write(master, b"/md-test fence-close\r")
+    wait(lambda: "stream stays literal" in fence_data()["fences"][-1]["content"], "Completed streamed text fence")
+    settle()
+    assert check_fences(7)[-1]["content"] == "FENCE_STREAM\n  **stream stays literal**"
+    for command in ["source", "conceal"]:
+        os.write(master, f"/md-test {command}\r".encode())
+        settle()
+        if command == "source":
+            assert all("background" not in fence["box"] for fence in fence_data()["fences"]), fence_data()
+        else:
+            check_fences(7)
+    os.write(master, b"/md off\r")
+    wait(lambda: not diag()["enabled"], "Disable fenced code styling")
+    settle()
+    assert all("background" not in fence["box"] for fence in fence_data()["fences"]), fence_data()
+    os.write(master, b"/md on\r")
+    wait(lambda: diag()["enabled"], "Restore fenced code styling")
+    settle()
+    check_fences(7)
+    for language in ["text", "txt", "plaintext", ""]:
+        os.write(master, f"/md-test fence-only {language}\r".encode())
+        wait(lambda: len(fence_data()["fences"]) == 1 and "FENCE_ONLY" in fence_data()["fences"][0]["content"],
+             "Code-only Markdown")
+        settle()
+        assert check_fences(1)[0]["content"] == "NATIVE_BODY_SENTINEL FENCE_ONLY\n  **still literal**"
+    assert diag()["raster"]["renders"] == rasters, "Code fences created image rasters"
     result = {"version": subprocess.check_output(["opencode", "--version"], text=True).strip(),
               "initial": initial, "afterScroll": after, "initialImageTransmissions": transmissions,
               "selection": selection,
                "lists": diag()["lists"], "listScrollDecoration": decoration,
                  "typography": diag()["typography"],
                  "tables": diag()["tables"],
-                  "result": "PASS: unified md on/off; heading/native fallback and inline colors; native tables with padded headers, compact body rows, wrapped/empty cells, selection and streaming; headings/quotes/JSON/lists regressions; cached scrolling"}
+                  "result": "PASS: unified md on/off; heading/native fallback and inline colors; native tables and fenced-code panels, selection and streaming; headings/quotes/JSON/lists regressions; cached scrolling"}
     (ART / "result.json").write_text(json.dumps(result, indent=2))
     print(result["result"])
     print(json.dumps({"raster": initial["raster"], "afterScroll": after["raster"]}, indent=2))

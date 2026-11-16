@@ -34,21 +34,41 @@ export default Plugin.define({
     const tables = createTables()
     const supported = () => renderer.capabilities?.kitty_graphics || renderer.capabilities?.image_protocol === "kitty"
     const color = () => rgbToHex(appearanceFor(context.themeMode).heading)
-    const unregisterJSON = context.markdown.registerCodeBlockRenderer("json", (block, render) => {
-      const code = render.defaultRender()
-      if (!enabled || !render.conceal || !(code instanceof CodeRenderable)) return code
-      code.content = prettyJSON(block.text)
+    function codePanel(code: Renderable | null, block: { text: string; lang?: string }) {
+      // Keep native code buffers and syntax highlighting. A renderer supplied
+      // by another plugin can return its own widget, which passes through.
+      if (!(code instanceof CodeRenderable)) return code
+      if (code.filetype === "json") code.content = prettyJSON(block.text)
       code.bg = context.theme.background.raised.base
+      // Markdown's inter-block spacing belongs to the panel, not its child.
+      code.marginTop = 0
+      code.marginBottom = 0
       const box = new BoxRenderable(renderer, {
-        width: "100%", flexDirection: "column", flexShrink: 0, padding: 1,
+        width: "100%", flexDirection: "column", flexShrink: 0, marginTop: 1,
+        paddingLeft: 2, paddingRight: 2, paddingBottom: 1,
         backgroundColor: context.theme.background.raised.base,
       })
-      box.add(new TextRenderable(renderer, {
-        content: "JSON", fg: context.theme.text.muted, height: 1, marginBottom: 1, selectable: false,
+      const language = code.filetype || block.lang?.trim().split(/\s+/, 1)[0] || "text"
+      const title = new BoxRenderable(renderer, {
+        height: 1, flexShrink: 0, marginBottom: 1,
+        marginLeft: -2, marginRight: -2, paddingLeft: 1, paddingRight: 1,
+        backgroundColor: context.theme.background.raised.high,
+      })
+      title.add(new TextRenderable(renderer, {
+        content: language.toLowerCase(), fg: context.theme.text.muted,
+        bg: context.theme.background.raised.high, height: 1, selectable: false,
       }))
+      box.add(title)
       box.add(code)
       return box
-    })
+    }
+    // These registrations also cover the host's code-only Markdown fast path.
+    // The general block hook below handles bare fences and other languages.
+    const unregisterCode = ["json", "text", "txt", "plaintext"].map(language =>
+      context.markdown.registerCodeBlockRenderer(language, (block, render) => {
+        const code = render.defaultRender()
+        return enabled && render.conceal ? codePanel(code, block) : code
+      }))
 
     class SelectableHeading extends ImageRenderable {
       private range: { start: number; end: number } | null = null
@@ -273,10 +293,12 @@ export default Plugin.define({
           const original = Reflect.get(node, key)
           const restoreLists = attachLists(node)
           const restoreTables = tables.attach(node)
-          const wrapper = (block: { kind?: string; type?: string; level?: number; depth?: number; text: string; tokens?: { text?: string; tokens?: unknown[] }[] },
+          const wrapper = (block: { kind?: string; type?: string; level?: number; depth?: number; text: string; lang?: string; tokens?: { text?: string; tokens?: unknown[] }[] },
             render: { defaultRender: () => Renderable | null; conceal: boolean }) => {
             if (!enabled || !render.conceal) return original?.(block, render)
             const kind = block.kind ?? block.type
+            if (kind === "code")
+              return codePanel(original?.(block, render) ?? render.defaultRender(), block)
             if (kind === "table") {
               const table = original?.(block, render) ?? render.defaultRender()
               if (table instanceof TextTableRenderable) tables.decorate(table)
@@ -388,7 +410,7 @@ export default Plugin.define({
     dump()
     return () => {
       stopped = true
-      unregisterJSON()
+      unregisterCode.forEach(unregister => unregister())
       renderer.removeFrameCallback(frame)
       renderer.off("frame", dump)
       restore()
