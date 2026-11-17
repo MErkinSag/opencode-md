@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { BoxRenderable, CodeRenderable, ImageRenderable, MarkdownRenderable, StyledText, TextRenderable, TextTableRenderable, rgbToHex, type Renderable, type Selection } from "@opentui/core"
+import { BoxRenderable, CodeRenderable, ImageRenderable, MarkdownRenderable, StyledText, TextRenderable, TextTableRenderable, Yoga, rgbToHex, type Renderable, type Selection } from "@opentui/core"
 import { writeFileSync } from "node:fs"
 import { createRaster } from "./raster.mjs"
 import { terminalFont } from "./font.mjs"
@@ -8,6 +8,7 @@ import { prettyJSON } from "./json.mjs"
 import { createTypography } from "./typography"
 import { appearanceFor } from "./appearance"
 import { createTables } from "./tables"
+import { attachFenceReuse } from "./fence-reuse.mjs"
 
 // Experimental adapter: the plugin API exposes code-block overrides but no
 // heading/quote/list hook yet. Wrap the MarkdownRenderable block hook on
@@ -16,7 +17,7 @@ export default Plugin.define({
   id: "md",
   async setup(context) {
     const raster = createRaster()
-    const attached = new Map<MarkdownRenderable, { key: string; original: unknown; wrapper: unknown; mode?: string; restoreLists?: () => void; restoreTables: () => void }>()
+    const attached = new Map<MarkdownRenderable, { key: string; original: unknown; wrapper: unknown; mode?: string; restoreLists?: () => void; restoreTables: () => void; restoreFences: () => void }>()
     const headings = new Set<Heading>()
     const quotes = new Set<BoxRenderable>()
     const styledLists = new WeakSet<Renderable>()
@@ -32,9 +33,19 @@ export default Plugin.define({
     const renderer = context.renderer
     const typography = createTypography(renderer)
     const tables = createTables()
+    const panels = new WeakMap<Renderable, CodeRenderable>()
+    const codePanels = new WeakMap<CodeRenderable, BoxRenderable>()
+    const fences = { created: 0, reused: 0 }
+    let reusableDefault = false
+    function defaultCode(render: { defaultRender: () => Renderable | null }) {
+      const previous = reusableDefault
+      reusableDefault = true
+      try { return render.defaultRender() }
+      finally { reusableDefault = previous }
+    }
     const supported = () => renderer.capabilities?.kitty_graphics || renderer.capabilities?.image_protocol === "kitty"
     const color = () => rgbToHex(appearanceFor(context.themeMode).heading)
-    function codePanel(code: Renderable | null, block: { text: string; lang?: string }) {
+    function codePanel(code: Renderable | null, block: { text: string; lang?: string }, reusable = false) {
       // Keep native code buffers and syntax highlighting. A renderer supplied
       // by another plugin can return its own widget, which passes through.
       if (!(code instanceof CodeRenderable)) return code
@@ -43,6 +54,8 @@ export default Plugin.define({
       // Markdown's inter-block spacing belongs to the panel, not its child.
       code.marginTop = 0
       code.marginBottom = 0
+      const existing = codePanels.get(code)
+      if (existing && !existing.isDestroyed) return existing
       const box = new BoxRenderable(renderer, {
         width: "100%", flexDirection: "column", flexShrink: 0, marginTop: 1,
         paddingLeft: 2, paddingRight: 2, paddingBottom: 1,
@@ -60,14 +73,17 @@ export default Plugin.define({
       }))
       box.add(title)
       box.add(code)
+      codePanels.set(code, box)
+      if (reusable) panels.set(box, code)
+      fences.created++
       return box
     }
     // These registrations also cover the host's code-only Markdown fast path.
     // The general block hook below handles bare fences and other languages.
     const unregisterCode = ["json", "text", "txt", "plaintext"].map(language =>
       context.markdown.registerCodeBlockRenderer(language, (block, render) => {
-        const code = render.defaultRender()
-        return enabled && render.conceal ? codePanel(code, block) : code
+        const code = defaultCode(render)
+        return enabled && render.conceal ? codePanel(code, block, true) : code
       }))
 
     class SelectableHeading extends ImageRenderable {
@@ -108,6 +124,8 @@ export default Plugin.define({
       private layout: ReturnType<typeof raster.render> | undefined
       private signature = ""
       private fallback: Renderable | null = null
+      private inset = -1
+      private bottom = 0
       constructor(private text: string, private level: number, private original: () => Renderable | null) {
         super(renderer, { width: "100%", height: 1, flexShrink: 0 })
         headings.add(this)
@@ -127,14 +145,18 @@ export default Plugin.define({
         // hits: streaming can insert/remove a paragraph between two headings.
         // Raster spacing already provides the larger top gap; omit the extra
         // Markdown row above it.
-        this.marginTop = 0
+        if (this.marginTop !== 0) this.marginTop = 0
         if (this.layout && !this.fallback) {
           const padding = stacked ? 0 : this.layout.paddingTop
-          this.paddingTop = padding
-          this.height = this.layout.rows + padding
+          this.size(this.layout.rows, padding)
         }
         const gap = next instanceof Heading ? 0 : next?.marginTop
-        this.marginBottom = typeof gap === "number" ? -Math.max(0, gap) : 0
+        const bottom = typeof gap === "number" ? -Math.max(0, gap) : 0
+        // marginBottom/paddingTop have no property getter on older OpenTUI.
+        // Read native margin state when available; remember our own inset.
+        const currentBottom = typeof this.getMargin === "function" ? this.getMargin(Yoga.Edge.Bottom).value : this.bottom
+        if (currentBottom !== bottom) this.marginBottom = bottom
+        this.bottom = bottom
         const cellWidth = renderer.resolution ? renderer.resolution.width / renderer.terminalWidth : 16
         const cellHeight = renderer.resolution ? renderer.resolution.height / renderer.terminalHeight : 32
         const input = { text: this.text, level: this.level, columns: this.width,
@@ -147,8 +169,7 @@ export default Plugin.define({
           const result = raster.render(input)
           this.layout = result
           const padding = stacked ? 0 : result.paddingTop
-          this.paddingTop = padding
-          this.height = result.rows + padding
+          this.size(result.rows, padding)
           if (!this.image) {
             this.image = new SelectableHeading(result, error => this.fail(error))
             this.add(this.image)
@@ -156,6 +177,13 @@ export default Plugin.define({
             this.image.replace(result)
           }
         } catch (error) { this.fail(error) }
+      }
+      private size(rows: number, padding: number) {
+        if (this.inset !== padding) {
+          this.paddingTop = padding
+          this.inset = padding
+        }
+        if (this.height !== rows + padding) this.height = rows + padding
       }
       fail(error: unknown) {
         failure = String(error)
@@ -274,6 +302,7 @@ export default Plugin.define({
         if (node.isDestroyed) continue
         saved.restoreLists?.()
         saved.restoreTables()
+        saved.restoreFences()
         // Access is guarded by runtime feature detection for OpenTUI 0.8/0.9.
         Reflect.set(node, saved.key, saved.original)
         if (saved.mode !== undefined) Reflect.set(node, "internalBlockMode", saved.mode)
@@ -293,12 +322,23 @@ export default Plugin.define({
           const original = Reflect.get(node, key)
           const restoreLists = attachLists(node)
           const restoreTables = tables.attach(node)
+          const restoreFences = attachFenceReuse(node, panels, (code, token, apply) => {
+            // Format before assigning the native buffer, avoiding two text
+            // replacements/highlight invalidations for each JSON update.
+            apply(code.filetype === "json" ? { ...token, text: prettyJSON(token.text) } : token)
+            fences.reused++
+          }, () => reusableDefault)
           const wrapper = (block: { kind?: string; type?: string; level?: number; depth?: number; text: string; lang?: string; tokens?: { text?: string; tokens?: unknown[] }[] },
             render: { defaultRender: () => Renderable | null; conceal: boolean }) => {
             if (!enabled || !render.conceal) return original?.(block, render)
             const kind = block.kind ?? block.type
-            if (kind === "code")
-              return codePanel(original?.(block, render) ?? render.defaultRender(), block)
+            if (kind === "code") {
+              // An arbitrary callback must receive a fresh default: it may
+              // conditionally change properties the native updater never resets.
+              // Only md's own defaults opt into borrowing an existing buffer.
+              const custom = original?.(block, render)
+              return custom ? codePanel(custom, block) : codePanel(defaultCode(render), block, true)
+            }
             if (kind === "table") {
               const table = original?.(block, render) ?? render.defaultRender()
               if (table instanceof TextTableRenderable) tables.decorate(table)
@@ -333,7 +373,7 @@ export default Plugin.define({
             return new Heading(block.tokens ? plain(block.tokens) : block.text, block.level ?? block.depth ?? 1, render.defaultRender)
           }
           const mode = "internalBlockMode" in node ? Reflect.get(node, "internalBlockMode") : undefined
-          attached.set(node, { key, original, wrapper, mode, restoreLists, restoreTables })
+          attached.set(node, { key, original, wrapper, mode, restoreLists, restoreTables, restoreFences })
           if (mode !== undefined) Reflect.set(node, "internalBlockMode", "top-level")
           Reflect.set(node, key, wrapper)
         }
@@ -358,7 +398,7 @@ export default Plugin.define({
     }
     const diagnostics = () => ({
       plugin: "md", enabled, supported: !!supported(), attached: attached.size, headings: headings.size,
-      raster: raster.stats, scans, failure, fontFamilies, lists, typography: typography.stats, tables: tables.stats,
+      raster: raster.stats, scans, failure, fontFamilies, lists, fences, typography: typography.stats, tables: tables.stats,
       headingColor: color(),
       api: Object.getOwnPropertyNames(MarkdownRenderable.prototype),
       resolution: renderer.resolution,

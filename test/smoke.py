@@ -19,8 +19,8 @@ INLINE_CODE = "#fb7185" if MODE == "dark" else "#d6336c"
 TABLE_HEADER = "#3f3f46" if MODE == "dark" else "#e5e7eb"
 TABLE_WHITE = "#18181b" if MODE == "dark" else "#ffffff"
 TABLE_CODE_BG = "#27272a" if MODE == "dark" else "#f5f5f5"
-ART = ROOT / "artifacts"
-ART.mkdir(exist_ok=True)
+ART = Path(os.environ.get("MD_TEST_ARTIFACTS", ROOT / "artifacts"))
+ART.mkdir(exist_ok=True, parents=True)
 DIAG = ART / "diagnostics.json"
 DIAG.unlink(missing_ok=True)
 READY = ART / "driver.ready"
@@ -30,13 +30,13 @@ def api(method, path, body=None):
     command = ["opencode", "api", method, path]
     if body is not None:
         command += ["--data", json.dumps(body)]
-    raw = subprocess.check_output(command, text=True, timeout=30)
+    raw = subprocess.check_output(command, text=True)
     if not raw.strip():
         return None
     value = json.loads(raw)
     return value.get("data", value) if isinstance(value, dict) else value
 
-info = api("post", "/api/session", {"title": "md plugin test", "location": {"directory": str(ROOT)}})
+info = api("post", "/api/session", {"title": "md plugin verification (retained)", "location": {"directory": str(ROOT)}})
 session = None
 child = None
 master = None
@@ -51,8 +51,8 @@ try:
     session = api("post", "/api/experimental/session/import", {
         "info": info, "location": {"directory": str(ROOT)},
         "messages": [
-            {"id": "msg_mduser", "type": "user", "time": {"created": 1}, "text": "Show the md plugin."},
-            {"id": "msg_mdassistant", "type": "assistant", "time": {"created": 2, "completed": 3},
+            {"id": "msg_mduser_" + seed, "type": "user", "time": {"created": 1}, "text": "Show the md plugin."},
+            {"id": "msg_mdassistant_" + seed, "type": "assistant", "time": {"created": 2, "completed": 3},
              "agent": "general", "model": {"providerID": "openai", "id": "gpt-6-astra"},
              "content": [{"type": "text", "text": text}]},
         ],
@@ -62,9 +62,11 @@ try:
     env = dict(os.environ, TERM="xterm-ghostty", COLORTERM="truecolor", TERM_PROGRAM="ghostty",
                OPENCODE_CLI_CONFIG_CONTENT=json.dumps({
                    "plugins": [{"package": str(ROOT), "options": {"diagnostics": str(DIAG)}},
-                               {"package": str(ROOT / "test/driver"), "options": {"ready": str(READY)}}],
+                               {"package": str(ROOT / "test/driver"), "options": {
+                                   "ready": str(READY), "otherSession": seed, "fixtureSession": session["id"]}}],
                      "highlights": False, "theme": {"mode": MODE},
-                    "terminal": {"copy": "manual"},
+                     "terminal": {"copy": "manual"},
+                   "keybinds": {"app.exit": "ctrl+alt+q"},
                    "attention": {"notifications": False, "sound": False},
                }))
     for key in list(env):
@@ -144,6 +146,16 @@ try:
     assert b"\x1b_G" in output, "No graphics output"
     assert b"Native paragraph" in output, "Body text was not emitted natively"
     initial = diag()
+    # Toast expiry can legitimately redraw. Once it has expired, cached
+    # headings must not keep requesting frames through native layout setters.
+    settle(4)
+    idle_before = diag()["scans"]
+    idle_bytes = len(output)
+    settle(.75)
+    idle_after = diag()["scans"]
+    idle_output = len(output) - idle_bytes
+    assert idle_after == idle_before, ("Idle Markdown kept redrawing", idle_before, idle_after)
+    assert idle_output == 0, "Idle Markdown emitted terminal output"
     assert initial["headingColor"] == HEADING, initial
     configured_fonts = re.findall(r"^font-family = (.+)$",
                                  subprocess.check_output(["ghostty", "+show-config"], text=True, timeout=5), re.M)
@@ -576,10 +588,27 @@ try:
     wait(lambda: len(fence_data()["fences"]) == 7, "Open streamed text fence")
     settle()
     assert check_fences(7)[-1]["content"].rstrip("\n") == "FENCE_STREAM"
-    os.write(master, b"/md-test fence-close\r")
-    wait(lambda: "stream stays literal" in fence_data()["fences"][-1]["content"], "Completed streamed text fence")
+    open_fence = check_fences(7)[-1]
+    stream_panels = [fence["box"]["id"] for fence in check_fences(7)[:6]]
+    reuse_before = diag()["fences"]["reused"]
+    os.write(master, b"/md-test fence-chunk\r")
+    wait(lambda: "stream stays literal" in fence_data()["fences"][-1]["content"], "Updated streamed text fence")
     settle()
-    assert check_fences(7)[-1]["content"] == "FENCE_STREAM\n  **stream stays literal**"
+    assert check_fences(7)[-1]["content"].rstrip("\n") == "FENCE_STREAM\n  **stream stays literal**"
+    closed_fence = check_fences(7)[-1]
+    assert open_fence["box"]["id"] == closed_fence["box"]["id"], "Streaming replaced the active code panel"
+    assert open_fence["instance"] == closed_fence["instance"], "Streaming replaced the native code buffer"
+    assert diag()["fences"]["reused"] > reuse_before, "Native fence reuse adapter was not exercised"
+    fence_history = fence_data()["history"]
+    assert all(frame["panel"] == open_fence["box"]["id"] and frame["instance"] == open_fence["instance"]
+               and frame["insetX"] == frame["insetY"] == 2
+               and frame["panelHeight"] == frame["height"] + 3 for frame in fence_history), fence_history
+    assert [fence["box"]["id"] for fence in check_fences(7)[:6]] == stream_panels, "Streaming rebuilt unchanged panels"
+    os.write(master, b"/md-test fence-close\r")
+    wait(lambda: fence_data()["fences"][-1]["content"] == "FENCE_STREAM\n  **stream stays literal**",
+         "Completed streamed text fence")
+    settle()
+    check_fences(7)
     for command in ["source", "conceal"]:
         os.write(master, f"/md-test {command}\r".encode())
         settle()
@@ -601,28 +630,94 @@ try:
              "Code-only Markdown")
         settle()
         assert check_fences(1)[0]["content"] == "NATIVE_BODY_SENTINEL FENCE_ONLY\n  **still literal**"
+    # A registered renderer can choose native code or its own widget based on
+    # the latest text. Reuse must still invoke it once for every changed token.
+    def foreign():
+        return json.loads(Path(str(READY) + ".foreign.json").read_text())
+    os.write(master, b"/md-test foreign-start\r")
+    wait(lambda: any("FENCE_FOREIGN_DEFAULT" in fence["content"] for fence in fence_data()["fences"]),
+         "Default-delegating third-party renderer")
+    settle()
+    calls = foreign()["calls"]
+    os.write(master, b"/md-test foreign-widget\r")
+    wait(lambda: foreign()["live"] and "FENCE_FOREIGN_WIDGET" in foreign()["content"], "Third-party replacement")
+    settle()
+    assert foreign()["calls"] == calls + 1, foreign()
+    assert not fence_data()["fences"], "Third-party widget was wrapped as native code"
+    os.write(master, b"/md-test foreign-default\r")
+    wait(lambda: bool(fence_data()["fences"]), "Third-party renderer returns to default code")
+    settle()
+    assert foreign()["calls"] == calls + 2 and not foreign()["live"], foreign()
+    default_fence = check_fences(1)[0]
+    os.write(master, b"/md-test foreign-update\r")
+    wait(lambda: "UPDATED" in fence_data()["fences"][0]["content"], "Default-delegating renderer gets fresh defaults")
+    settle()
+    updated_fence = check_fences(1)[0]
+    assert foreign()["calls"] == calls + 3, foreign()
+    assert default_fence["instance"] != updated_fence["instance"]
+    assert default_fence["wrapMode"] == "none" and updated_fence["wrapMode"] != "none"
+    os.write(master, b"/md-test fence-js\r")
+    wait(lambda: any("FENCE_JS_STREAM" in fence["content"] for fence in fence_data()["fences"]), "Streaming JavaScript fence")
+    settle()
+    js_before = check_fences(1)[0]
+    os.write(master, b"/md-test fence-js-update\r")
+    wait(lambda: "streamed syntax" in fence_data()["fences"][0]["content"], "Updated JavaScript fence")
+    settle()
+    js_after = check_fences(1)[0]
+    assert js_before["instance"] == js_after["instance"], "Unregistered-language native buffer was replaced"
+    assert js_before["box"]["id"] == js_after["box"]["id"]
+    os.write(master, b"/md-test visibility\r")
+    def visibility():
+        try:
+            return json.loads(Path(str(READY) + ".visibility.json").read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+    wait(lambda: bool(visibility()) and (not visibility()["enabled"] or visibility()["results"][-1]["phase"] == "restored"),
+         "Owned-client session-tab visibility probe")
+    assert any("NATIVE_BODY_SENTINEL" in node["content"] for node in visibility()["results"][-1]["markdown"]), visibility()
     assert diag()["raster"]["renders"] == rasters, "Code fences created image rasters"
     result = {"version": subprocess.check_output(["opencode", "--version"], text=True).strip(),
+              "idle": {"before": idle_before, "after": idle_after, "terminalBytes": idle_output},
               "initial": initial, "afterScroll": after, "initialImageTransmissions": transmissions,
               "selection": selection,
                "lists": diag()["lists"], "listScrollDecoration": decoration,
                  "typography": diag()["typography"],
-                 "tables": diag()["tables"],
+                  "tables": diag()["tables"],
+                  "fences": diag()["fences"], "fenceHistory": fence_history,
+                  "thirdParty": foreign(),
+                  "visibility": visibility(),
                   "result": "PASS: unified md on/off; heading/native fallback and inline colors; native tables and fenced-code panels, selection and streaming; headings/quotes/JSON/lists regressions; cached scrolling"}
     (ART / "result.json").write_text(json.dumps(result, indent=2))
     print(result["result"])
     print(json.dumps({"raster": initial["raster"], "afterScroll": after["raster"]}, indent=2))
 finally:
     (ART / "terminal-output.bin").write_bytes(output)
-    if child:
-        child.terminate()
-        try:
-            child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
+    if child and child.poll() is None:
+        # Only this test's newly spawned client receives the documented app.exit
+        # command. Keep fixture sessions and never force process cleanup.
+        os.write(master, b"\x1b\x11")  # documented app.exit, isolated binding
+        end = time.monotonic() + 15
+        while child.poll() is None and time.monotonic() < end:
+            pump()
+        if child.poll() is None:
+            # Retain the PTY master as well: closing its last descriptor can
+            # hang up the client. A detached reader keeps it alive for recovery.
+            keeper = os.fork()
+            if keeper == 0:
+                os.setsid()
+                while True:
+                    try:
+                        os.read(master, 1024 * 1024)
+                    except OSError:
+                        os._exit(0)
+            (ART / "preserved-client.json").write_text(json.dumps({
+                "pid": child.pid, "session": session["id"], "ptyKeeper": keeper,
+            }))
+            raise RuntimeError(f"Normal app.exit timed out; preserved client {child.pid}, session {session['id']}, PTY keeper {keeper}")
     if master is not None:
         os.close(master)
-    if session:
-        api("delete", "/api/session/" + session["id"])
-    api("delete", "/api/session/" + seed)
+    (ART / "retained-sessions.json").write_text(json.dumps({
+        "seed": seed, "session": session["id"] if session else None,
+        "pid": child.pid if child else None, "exitCode": child.returncode if child else None,
+        "sessionsRetained": True, "terminationSignalsSent": False,
+    }, indent=2))

@@ -9,6 +9,26 @@ export default Plugin.define({
     let timer: ReturnType<typeof setInterval> | undefined
     const capabilities = Object.getOwnPropertyDescriptor(context.renderer, "capabilities")
     let painted: { text: string; fg: string; bg: string; attributes: number }[][] = []
+    let recordedAPI = false
+    const instances = new WeakMap<object, number>()
+    let nextInstance = 0
+    const instance = (node: object) => {
+      if (!instances.has(node)) instances.set(node, ++nextInstance)
+      return instances.get(node)
+    }
+    const fenceHistory: unknown[] = []
+    let foreignCalls = 0
+    let foreignWidget: TextRenderable | undefined
+    const unregisterForeign = context.markdown.registerCodeBlockRenderer("md-test-custom", (block, render) => {
+      foreignCalls++
+      if (!block.text.includes("FENCE_FOREIGN_WIDGET")) {
+        const code = render.defaultRender()
+        if (code instanceof CodeRenderable && !block.text.includes("UPDATED")) code.wrapMode = "none"
+        return code
+      }
+      foreignWidget = new TextRenderable(context.renderer, { content: block.text })
+      return foreignWidget
+    })
     const capture = (buffer: OptimizedBuffer) => {
       painted = buffer.getSpanLines().map(line => line.spans.map(span => ({
         text: span.text, fg: rgbToHex(span.fg), bg: rgbToHex(span.bg), attributes: span.attributes,
@@ -41,13 +61,76 @@ export default Plugin.define({
             node.content = readFileSync(new URL("../fences.md", import.meta.url), "utf8")
             return
           }
+          if (input?.trim() === "foreign-start") {
+            node.streaming = true
+            node.content = "NATIVE_BODY_SENTINEL\n\n```md-test-custom\nFENCE_FOREIGN_DEFAULT\n"
+            return
+          }
+          if (input?.trim() === "foreign-widget") {
+            node.content = node.content.replace("FENCE_FOREIGN_DEFAULT", "FENCE_FOREIGN_WIDGET")
+            return
+          }
+          if (input?.trim() === "foreign-default") {
+            node.content = node.content.replace("FENCE_FOREIGN_WIDGET", "FENCE_FOREIGN_DEFAULT")
+            return
+          }
+          if (input?.trim() === "foreign-update") {
+            node.content = node.content.replace("FENCE_FOREIGN_DEFAULT", "FENCE_FOREIGN_DEFAULT_UPDATED")
+            return
+          }
+          if (input?.trim() === "fence-js") {
+            node.streaming = true
+            node.content = "NATIVE_BODY_SENTINEL\n\n```javascript\nFENCE_JS_STREAM\n"
+            return
+          }
+          if (input?.trim() === "fence-js-update") {
+            node.content += "// streamed syntax stays native\n"
+            return
+          }
+          if (input?.trim() === "visibility") {
+            const results: unknown[] = []
+            const inspect = (phase: string) => {
+              const markdown: unknown[] = []
+              function visit(child, visible = true) {
+                visible &&= child.visible !== false
+                if (child instanceof MarkdownRenderable) markdown.push({
+                  content: child.content.slice(0, 120), visible: child.visible, ancestorsVisible: visible,
+                  x: child.x, y: child.y, width: child.width, height: child.height,
+                })
+                for (const nested of child.getChildren()) visit(nested, visible)
+              }
+              visit(context.renderer.root)
+              results.push({ phase, markdown, tabs: context.ui.tabs.list(),
+                focusedRenderable: context.renderer.currentFocusedRenderable?.constructor.name,
+                terminalFocusState: Reflect.get(context.renderer, "_terminalFocusState"),
+              })
+              snapshot(context.options.ready + ".visibility.json", JSON.stringify({
+                enabled: context.ui.tabs.enabled(), results,
+              }))
+            }
+            inspect("original")
+            if (!context.ui.tabs.enabled()) return
+            // Both IDs belong to this test, never an existing user client.
+            context.ui.tabs.open(String(context.options.otherSession))
+            context.ui.tabs.focus(String(context.options.otherSession))
+            setTimeout(() => {
+              inspect("other")
+              context.ui.tabs.focus(String(context.options.fixtureSession))
+              setTimeout(() => inspect("restored"), 500)
+            }, 500)
+            return
+          }
           if (input?.trim() === "fence-append") {
             node.streaming = true
             node.content += "\n\n```text\nFENCE_STREAM\n"
             return
           }
+          if (input?.trim() === "fence-chunk") {
+            node.content += "  **stream stays literal**\n"
+            return
+          }
           if (input?.trim() === "fence-close") {
-            node.content += "  **stream stays literal**\n```\n"
+            node.content += "```\n"
             node.streaming = false
             return
           }
@@ -169,7 +252,8 @@ export default Plugin.define({
             ? [child.chunks.map(chunk => chunk.text).join("")]
             : child.getChildren().flatMap(labels)
           fences.push({
-            content: node.content, plainText: node.plainText, filetype: node.filetype,
+            instance: instance(node),
+            content: node.content, plainText: node.plainText, filetype: node.filetype, wrapMode: node.wrapMode,
             x: node.x, y: node.y, width: node.width, height: node.height, background: rgbToHex(node.bg),
             box: box && { id: box.id, type: box.constructor.name, x: box.x, y: box.y,
               width: box.width, height: box.height, marginTop: box.marginTop,
@@ -178,6 +262,10 @@ export default Plugin.define({
             },
             above: box.y > 0 ? painted[box.y - 1] : [],
             painted: painted.slice(Math.max(0, box.y), Math.max(0, box.y + box.height)),
+          })
+          if (node.content.includes("FENCE_STREAM") && (node.height > 0 || fenceHistory.length)) fenceHistory.push({
+            instance: instance(node), panel: box.id, height: node.height, panelHeight: box.height,
+            insetX: node.x - box.x, insetY: node.y - box.y,
           })
         }
         if (node instanceof CodeRenderable && node.content.includes("TABLE_HEADING")) {
@@ -215,6 +303,13 @@ export default Plugin.define({
           }
         }
         if (node instanceof MarkdownRenderable) {
+          if (!recordedAPI) {
+            snapshot(context.options.ready + ".native-api.json", JSON.stringify(Object.fromEntries(
+              ["updateTopLevelBlocks", "buildTopLevelRenderBlocks", "syncTopLevelBlockState",
+                "applyCodeBlockRenderable", "createTopLevelRenderable", "createTopLevelCustomRenderable",
+                "renderCustomNode"].map(key => [key, String(Reflect.get(node, key))]))))
+            recordedAPI = true
+          }
           const children = node.getChildren()
           children.forEach((child, index) => {
             const next = children[index + 1]
@@ -251,8 +346,12 @@ export default Plugin.define({
         tables, nativeHeadings, background: rgbToHex(context.theme.background.base),
       }))
       snapshot(context.options.ready + ".fences.json", JSON.stringify({
-        fences, background: rgbToHex(context.theme.background.raised.base),
+        fences, history: fenceHistory, background: rgbToHex(context.theme.background.raised.base),
         titleBackground: rgbToHex(context.theme.background.raised.high),
+      }))
+      snapshot(context.options.ready + ".foreign.json", JSON.stringify({
+        calls: foreignCalls, live: foreignWidget ? !foreignWidget.isDestroyed : false,
+        content: foreignWidget && !foreignWidget.isDestroyed ? foreignWidget.chunks.map(chunk => chunk.text).join("") : "",
       }))
       snapshot(context.options.ready + ".inline.json", JSON.stringify({
         palette: { text: rgbToHex(context.theme.markdown.text), codeBackground: rgbToHex(context.theme.background.raised.high),
@@ -263,6 +362,7 @@ export default Plugin.define({
     context.renderer.on("frame", inspect)
     return () => {
       clearInterval(timer)
+      unregisterForeign()
       if (capabilities) Object.defineProperty(context.renderer, "capabilities", capabilities)
       else Reflect.deleteProperty(context.renderer, "capabilities")
       context.renderer.removePostProcessFn(capture)

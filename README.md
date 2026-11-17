@@ -161,6 +161,21 @@ needed by their text. The raster LRU accounts for both PNG bytes and decoded
 pixels, capped at 8 MiB. Mounted native image widgets also retain their own
 resources, released with their Markdown widget or when toggled off.
 
+Cached headings update layout only when spacing or size changes, allowing an
+idle transcript to settle without scheduling another frame. On the detected
+`renderNode` engine, streamed fences retain their panel and native code buffer.
+A small factory adapter still calls registered renderers for each changed token.
+Third-party callbacks receive fresh defaults, preserving conditional widget
+customizations as well as content-dependent replacements. Native reconciliation owns
+removal, ordering, source-mode changes and forced style refreshes (including
+stream completion). Unrecognized engines retain their normal rendering path.
+
+The adapter scans the current process's mounted renderer tree, including mounted
+offscreen Markdown. It does not enumerate saved sessions or other TUI processes.
+The OpenCode 2.3.0 smoke probe switches between its own session tabs and records
+which transcripts remain mounted. Terminal keyboard focus is not a reliable
+pane-visibility signal, so the plugin does not suspend rendering based on focus.
+
 The heading image implements OpenTUI's selectable-renderable contract. Glyph
 bounds and source offsets are retained with each raster. Selection highlights
 are painted from that cached raster; they do not rerender the text or document.
@@ -181,7 +196,9 @@ MD_TEST_THEME_MODE=dark python3 test/smoke.py
 ```
 
 The smoke test uses the installed OpenCode binary with private PTY capability
-replies and a disposable imported transcript. Its test-only plugin exercises
+replies and a newly imported test transcript. Its own client exits normally through
+`app.exit`; saved test sessions are retained, and no existing client is controlled.
+Its test-only plugin exercises
 streaming against the mounted Markdown widget without a model call. It verifies:
 
 - Native body text emitted alongside heading graphics.
@@ -190,6 +207,8 @@ streaming against the mounted Markdown widget without a model call. It verifies:
 - Forward and reverse selections span headings and native body text.
 - Unit checks cover partial, wrapped Unicode, word, and cleared selections.
 - Thirty wheel events with **zero additional heading rasters**.
+- Settled enlarged headings produce **zero frames and terminal bytes** during
+  the idle observation window.
 - Actual terminal resize and resulting narrower layout.
 - `/md off` restores native Markdown, including indentation, JSON, quotes, tables, and
   headings; `/md on` restores all styling together.
@@ -200,6 +219,9 @@ streaming against the mounted Markdown widget without a model call. It verifies:
 - Text, unlabelled, programming-language, JSONC, and unknown-language fences get
   filled native panels. Tests cover syntax colors, literal content, selection,
   incomplete streaming, code-only Markdown, source mode, and `/md off` restoration.
+- Streamed fence chunks preserve panel/code-buffer identity and padded geometry;
+  unchanged panels are reused. Third-party callbacks still run once per changed
+  token and can switch between native code and their own widgets.
 - Quotes retain native drag selection and accept streamed content.
 - Bullet/numbered lists retain nesting, starting numbers, hanging alignment,
   native selection, and wrapping after resize.
@@ -218,6 +240,8 @@ streaming against the mounted Markdown widget without a model call. It verifies:
   Scrolling and resize perform **zero additional table-cell styling**.
 
 Each run records raster counts, timing, and cache memory in `artifacts/result.json`.
+Set `MD_TEST_ARTIFACTS` to keep separate runs. The same directory records retained
+test session IDs and the client's normal exit status in `retained-sessions.json`.
 Scrolling must leave the raster count unchanged. These are renderer measurements,
 not GPU frame-time or end-to-end latency claims. Test artifacts are generated
 locally and excluded from version control.
