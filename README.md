@@ -5,13 +5,6 @@ code blocks, formatted JSON, and enlarged headings, controlled by one on/off swi
 Enlarged headings use small cached PNGs, drawn with Skia through `@napi-rs/canvas`.
 All styling runs inside OpenCode's existing transcript.
 
-## Before and after
-
-The same [Markdown example](docs/example.md), with `/md off` on the left and
-`/md on` on the right. Captured in OpenCode 2.3.0 with a light theme in cmux's
-Ghostty-backed terminal; transcript crops use the same font and terminal width.
-Click the image for the full-resolution comparison.
-
 [![Before and after enabling md: enlarged headings, rose inline code, padded tables, styled blockquotes, labelled code panels, and formatted JSON.](docs/images/before-after.png)](docs/images/before-after.png)
 
 ## Install
