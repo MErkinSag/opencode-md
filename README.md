@@ -1,9 +1,12 @@
-# md — Markdown styling for OpenCode
+# md — Markdown styling for OpenCode TUI
+
+Richer Markdown for your terminal workflow, without switching to a web view or a
+custom app.
 
 One OpenCode 2 TUI plugin for Markdown typography, tables, lists, blockquotes,
 code blocks, formatted JSON, and enlarged headings, controlled by one on/off switch.
 Enlarged headings use small cached PNGs, drawn with Skia through `@napi-rs/canvas`.
-All styling runs inside OpenCode's existing transcript.
+All styling runs inside OpenCode's existing terminal transcript.
 
 [![Before and after enabling md: enlarged headings, rose inline code, padded tables, styled blockquotes, labelled code panels, and formatted JSON.](docs/images/before-after.png)](docs/images/before-after.png)
 

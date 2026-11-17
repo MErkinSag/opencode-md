@@ -1,6 +1,6 @@
 {
   "name": "md",
-  "description": "Markdown styling for OpenCode: typography, tables, lists, quotes, JSON, and enlarged headings.",
+  "description": "Markdown styling for OpenCode TUI: typography, tables, lists, quotes, JSON, and enlarged headings.",
   "version": "0.1.0",
   "private": true,
   "repository": {
