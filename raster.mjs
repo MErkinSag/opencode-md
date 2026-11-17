@@ -29,9 +29,9 @@ export function createRaster(limit = 8 * 1024 * 1024) {
     // shrinking a glyph inside the same terminal row would ADD whitespace.
     const styles = [
       { scale: .85, before: .08, after: .45 },
-      { scale: 1, before: .35, after: .9 },
-      { scale: 1.2, before: .65, after: 1.125 },
-      { scale: 1.45, before: 1, after: 1.29375 },
+      { scale: .903, before: .35, after: .9 },
+      { scale: 1.0836, before: .65, after: 1.125 },
+      { scale: 1.30935, before: 1, after: 1.29375 },
     ]
     let plan
     for (const style of styles.slice(0, Math.max(1, Math.min(4, 5 - level)))) {
